@@ -29,7 +29,8 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 # internal modules
 from utils.language_selection import ask_language
-from whisper_api_client import transcribe_via_api, WhisperAPIError
+from whisper_asr_client import transcribe_via_asr, WhisperASRError
+from whisperlivekit_client import transcribe_via_wlk, WLKError
 
 # config
 from config_loader import ConfigLoader
@@ -552,22 +553,49 @@ def log_stderr(line):
 # transcription logic with header inclusion based on settings
 # transcribe_audio function
 async def transcribe_audio(bot, update, audio_path, output_dir, youtube_url, video_info_message, include_header, model, device, language):
-    api_settings = ConfigLoader.get_whisper_api_settings()
+    wlk_settings = ConfigLoader.get_whisperlivekit_settings()
+    asr_settings = ConfigLoader.get_whisper_asr_settings()
 
-    if api_settings['use_api_mode']:
-        logger.info("API mode enabled, attempting to use Whisper API webservice")
+    if wlk_settings['use_wlk_mode']:
+        logger.info("WLK mode enabled, attempting to use WhisperLiveKit")
 
         try:
-            return await transcribe_audio_api(
+            return await transcribe_audio_wlk(
                 bot, update, audio_path, output_dir, youtube_url,
                 video_info_message, include_header, model, device, language,
-                api_settings
+                wlk_settings
             )
-        except (WhisperAPIError, Exception) as e:
-            logger.error(f"API transcription failed: {e}")
+        except (WLKError, Exception) as e:
+            logger.error(f"WLK transcription failed: {e}")
 
-            if api_settings['fallback_to_local']:
-                logger.warning("API unavailable, falling back to local execution")
+            if wlk_settings['fallback_to_local']:
+                logger.warning("WLK unavailable, falling back to local execution")
+                return await transcribe_audio_local(
+                    bot, update, audio_path, output_dir, youtube_url,
+                    video_info_message, include_header, model, device, language
+                )
+            else:
+                logger.error("Fallback to local disabled, transcription failed")
+                if update and update.message:
+                    await update.message.reply_text(
+                        "⚠️ Transcription service unavailable. Please try again later."
+                    )
+                return {}, ""
+
+    elif asr_settings['use_asr_mode']:
+        logger.info("ASR mode enabled, attempting to use Whisper ASR webservice")
+
+        try:
+            return await transcribe_audio_asr(
+                bot, update, audio_path, output_dir, youtube_url,
+                video_info_message, include_header, model, device, language,
+                asr_settings
+            )
+        except (WhisperASRError, Exception) as e:
+            logger.error(f"ASR transcription failed: {e}")
+
+            if asr_settings['fallback_to_local']:
+                logger.warning("ASR unavailable, falling back to local execution")
                 return await transcribe_audio_local(
                     bot, update, audio_path, output_dir, youtube_url,
                     video_info_message, include_header, model, device, language
@@ -695,11 +723,10 @@ async def transcribe_audio_local(bot, update, audio_path, output_dir, youtube_ur
         logger.error(f"An error occurred during transcription: {e}")
         return {}, ""
 
-# transcription logic using the API with header inclusion based on settings
-async def transcribe_audio_api(bot, update, audio_path, output_dir, youtube_url, video_info_message, include_header, model, device, language, api_settings):
-    logger.info(f"Using API mode for transcription")
+async def transcribe_audio_asr(bot, update, audio_path, output_dir, youtube_url, video_info_message, include_header, model, device, language, asr_settings):
+    logger.info("Using ASR mode for transcription")
 
-    ai_transcript_header = f"[ Transcript generated with: https://github.com/FlyingFathead/whisper-transcriber-telegram-bot/ | Whisper API | Engine: `{api_settings['api_engine']}` | Language: `{language}` ]"
+    ai_transcript_header = f"[ Transcript generated with: https://github.com/FlyingFathead/whisper-transcriber-telegram-bot/ | Whisper ASR | Engine: `{asr_settings['asr_engine']}` | Language: `{language}` ]"
     header_content = ""
 
     if include_header:
@@ -711,23 +738,23 @@ async def transcribe_audio_api(bot, update, audio_path, output_dir, youtube_url,
 
     try:
         for fmt in ['txt', 'srt', 'vtt']:
-            logger.info(f"Requesting {fmt} format from API")
+            logger.info(f"Requesting {fmt} format from ASR webservice")
 
-            content = await transcribe_via_api(
-                api_url=api_settings['api_url'],
+            content = await transcribe_via_asr(
+                asr_url=asr_settings['asr_url'],
                 audio_path=audio_path,
                 model=model,
                 language=language,
                 output_format=fmt,
-                api_engine=api_settings['api_engine'],
-                vad_filter=api_settings['enable_vad_filter'],
-                word_timestamps=api_settings['enable_word_timestamps'],
-                diarize=api_settings['enable_diarization'],
-                min_speakers=api_settings['min_speakers'],
-                max_speakers=api_settings['max_speakers'],
-                timeout=api_settings['api_timeout'],
-                retry_attempts=api_settings['api_retry_attempts'],
-                verify_ssl=api_settings['verify_ssl']
+                asr_engine=asr_settings['asr_engine'],
+                vad_filter=asr_settings['enable_vad_filter'],
+                word_timestamps=asr_settings['enable_word_timestamps'],
+                diarize=asr_settings['enable_diarization'],
+                min_speakers=asr_settings['min_speakers'],
+                max_speakers=asr_settings['max_speakers'],
+                timeout=asr_settings['asr_timeout'],
+                retry_attempts=asr_settings['asr_retry_attempts'],
+                verify_ssl=asr_settings['verify_ssl']
             )
 
             file_path = f"{output_dir}/{base_filename}.{fmt}"
@@ -741,7 +768,7 @@ async def transcribe_audio_api(bot, update, audio_path, output_dir, youtube_url,
                 f.write(content)
 
             created_files[fmt] = file_path
-            logger.info(f"API transcription file created: {file_path}")
+            logger.info(f"ASR transcription file created: {file_path}")
 
         current_transcription_settings = ConfigLoader.get_transcription_settings()
         send_as_files_enabled = current_transcription_settings.get('send_as_files', False)
@@ -761,12 +788,74 @@ async def transcribe_audio_api(bot, update, audio_path, output_dir, youtube_url,
 
         return created_files, raw_content
 
-    except WhisperAPIError as e:
-        logger.error(f"API transcription failed: {e}")
+    except WhisperASRError as e:
+        logger.error(f"ASR transcription failed: {e}")
         return {}, ""
 
     except Exception as e:
-        logger.error(f"An error occurred during API transcription: {e}")
+        logger.error(f"An error occurred during ASR transcription: {e}")
+        return {}, ""
+
+async def transcribe_audio_wlk(bot, update, audio_path, output_dir, youtube_url, video_info_message, include_header, model, device, language, wlk_settings):
+    logger.info("Using WhisperLiveKit mode for transcription")
+
+    ai_transcript_header = f"[ Transcript generated with: https://github.com/FlyingFathead/whisper-transcriber-telegram-bot/ | WhisperLiveKit | Language: `{language}` ]"
+    header_content = ""
+
+    if include_header:
+        header_content = f"{video_info_message}\n\n{ai_transcript_header}\n\n"
+
+    base_filename = os.path.splitext(os.path.basename(audio_path))[0]
+    created_files = {}
+    raw_content = ""
+
+    try:
+        txt_content, srt_content, vtt_content = await transcribe_via_wlk(
+            wlk_url=wlk_settings['wlk_url'],
+            audio_path=audio_path,
+            timeout=wlk_settings['wlk_timeout'],
+            chunk_size=wlk_settings['wlk_chunk_size'],
+            verify_ssl=wlk_settings['wlk_verify_ssl'],
+        )
+
+        for fmt, content in [('txt', txt_content), ('srt', srt_content), ('vtt', vtt_content)]:
+            file_path = os.path.join(output_dir, f"{base_filename}.{fmt}")
+
+            if fmt == 'txt':
+                raw_content = content
+                if include_header:
+                    content = header_content + content
+
+            with open(file_path, 'w') as f:
+                f.write(content)
+
+            created_files[fmt] = file_path
+            logger.info(f"WLK transcription file created: {file_path}")
+
+        current_transcription_settings = ConfigLoader.get_transcription_settings()
+        send_as_files_enabled = current_transcription_settings.get('send_as_files', False)
+        send_timestamped_txt_enabled = current_transcription_settings.get('send_timestamped_txt', False)
+
+        if send_as_files_enabled and send_timestamped_txt_enabled:
+            srt_file_path = created_files.get('srt')
+            if srt_file_path and os.path.exists(srt_file_path):
+                timestamped_txt_filename = f"{base_filename}_timestamped.txt"
+                timestamped_txt_path = os.path.join(output_dir, timestamped_txt_filename)
+
+                success = create_timestamped_txt_from_srt(srt_file_path, timestamped_txt_path, header_content)
+                if success:
+                    created_files['timestamped_txt'] = timestamped_txt_path
+                else:
+                    logger.error(f"Failed to create timestamped TXT file from {srt_file_path}")
+
+        return created_files, raw_content
+
+    except WLKError as e:
+        logger.error(f"WLK transcription failed: {e}")
+        return {}, ""
+
+    except Exception as e:
+        logger.error(f"An error occurred during WLK transcription: {e}")
         return {}, ""
 
 # debugger for yt-dlp version

@@ -8,7 +8,7 @@ from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-class WhisperAPIError(Exception):
+class WhisperASRError(Exception):
     pass
 
 def get_audio_mime_type(file_path: str) -> str:
@@ -30,13 +30,13 @@ def get_audio_mime_type(file_path: str) -> str:
     }
     return mime_map.get(ext, 'application/octet-stream')
 
-async def transcribe_via_api(
-    api_url: str,
+async def transcribe_via_asr(
+    asr_url: str,
     audio_path: str,
     model: str,
     language: str,
     output_format: str,
-    api_engine: str = "faster_whisper",
+    asr_engine: str = "faster_whisper",
     vad_filter: bool = False,
     word_timestamps: bool = False,
     diarize: bool = False,
@@ -47,9 +47,9 @@ async def transcribe_via_api(
     verify_ssl: bool = True
 ) -> str:
     if not os.path.exists(audio_path):
-        raise WhisperAPIError(f"Audio file not found: {audio_path}")
+        raise WhisperASRError(f"Audio file not found: {audio_path}")
 
-    endpoint = f"{api_url.rstrip('/')}/asr"
+    endpoint = f"{asr_url.rstrip('/')}/asr"
 
     params = {
         "task": "transcribe",
@@ -60,20 +60,20 @@ async def transcribe_via_api(
     if language and language != "auto":
         params["language"] = language
 
-    if vad_filter and api_engine == "faster_whisper":
+    if vad_filter and asr_engine == "faster_whisper":
         params["vad_filter"] = "true"
 
-    if word_timestamps and api_engine == "faster_whisper":
+    if word_timestamps and asr_engine == "faster_whisper":
         params["word_timestamps"] = "true"
 
-    if diarize and api_engine == "whisperx":
+    if diarize and asr_engine == "whisperx":
         params["diarize"] = "true"
         if min_speakers is not None:
             params["min_speakers"] = str(min_speakers)
         if max_speakers is not None:
             params["max_speakers"] = str(max_speakers)
 
-    logger.info(f"API request params: {params}")
+    logger.info(f"ASR request params: {params}")
 
     ssl_context = None if verify_ssl else False
     mime_type = get_audio_mime_type(audio_path)
@@ -85,7 +85,7 @@ async def transcribe_via_api(
 
     for attempt in range(retry_attempts):
         try:
-            logger.info(f"Attempting API request (attempt {attempt + 1}/{retry_attempts}) to {endpoint}")
+            logger.info(f"Attempting ASR request (attempt {attempt + 1}/{retry_attempts}) to {endpoint}")
 
             connector = aiohttp.TCPConnector(ssl=ssl_context)
             async with aiohttp.ClientSession(connector=connector) as session:
@@ -103,31 +103,31 @@ async def transcribe_via_api(
                 ) as response:
                     if response.status == 200:
                         content = await response.text()
-                        logger.info(f"API request successful for format {output_format}")
+                        logger.info(f"ASR request successful for format {output_format}")
                         return content
                     else:
                         error_text = await response.text()
-                        logger.error(f"API request failed with status {response.status}: {error_text}")
-                        raise WhisperAPIError(f"API returned status {response.status}: {error_text}")
+                        logger.error(f"ASR request failed with status {response.status}: {error_text}")
+                        raise WhisperASRError(f"ASR server returned status {response.status}: {error_text}")
         except asyncio.TimeoutError:
-            logger.error(f"API request timeout (attempt {attempt + 1}/{retry_attempts})")
+            logger.error(f"ASR request timeout (attempt {attempt + 1}/{retry_attempts})")
             if attempt < retry_attempts - 1:
                 wait_time = 2 ** attempt
                 logger.info(f"Retrying in {wait_time} seconds...")
                 await asyncio.sleep(wait_time)
             else:
-                raise WhisperAPIError("API request timed out after all retry attempts")
+                raise WhisperASRError("ASR request timed out after all retry attempts")
         except aiohttp.ClientError as e:
-            logger.error(f"API request failed (attempt {attempt + 1}/{retry_attempts}): {e}")
+            logger.error(f"ASR request failed (attempt {attempt + 1}/{retry_attempts}): {e}")
             if attempt < retry_attempts - 1:
                 wait_time = 2 ** attempt
                 logger.info(f"Retrying in {wait_time} seconds...")
                 await asyncio.sleep(wait_time)
             else:
-                raise WhisperAPIError(f"API request failed after all retry attempts: {e}")
+                raise WhisperASRError(f"ASR request failed after all retry attempts: {e}")
 
         except Exception as e:
-            logger.error(f"Unexpected error during API request: {e}")
-            raise WhisperAPIError(f"Unexpected error: {e}")
+            logger.error(f"Unexpected error during ASR request: {e}")
+            raise WhisperASRError(f"Unexpected error: {e}")
 
-    raise WhisperAPIError("Failed to transcribe via API after all attempts")
+    raise WhisperASRError("Failed to transcribe via ASR after all attempts")

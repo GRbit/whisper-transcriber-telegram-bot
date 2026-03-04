@@ -219,27 +219,21 @@ If you just need to see the options and help, type:
 ./src/utils/configmerger.py
 ```
 
-## Whisper API Mode
+## WhisperLiveKit Mode
 
-The bot can offload transcription to a remote Whisper-compatible API server instead of running a local model. This requires a running instance of a Whisper ASR webservice (e.g. `faster-whisper-server`, `whisperX`).
+The bot can stream audio to a [WhisperLiveKit](https://github.com/QuentinFuxa/WhisperLiveKit) server for real-time transcription via WebSocket. This is an alternative to the HTTP-based Whisper ASR mode and the local model. When both `use_wlk_mode` and `use_asr_mode` are enabled, WLK takes priority.
 
 ### Configuration
 
-Add or edit the `[WhisperAPISettings]` section in `config/config.ini`:
+Add or edit the `[WhisperLiveKitSettings]` section in `config/config.ini`:
 
 ```ini
-[WhisperAPISettings]
-use_api_mode = False
-api_url = http://localhost:9000
-api_engine = faster_whisper
-verify_ssl = True
-enable_diarization = False
-min_speakers =
-max_speakers =
-enable_vad_filter = True
-enable_word_timestamps = False
-api_timeout = 300
-api_retry_attempts = 3
+[WhisperLiveKitSettings]
+use_wlk_mode = False
+wlk_url = ws://localhost:8765
+wlk_verify_ssl = True
+wlk_timeout = 300
+wlk_chunk_size = 4096
 fallback_to_local = False
 ```
 
@@ -247,22 +241,63 @@ fallback_to_local = False
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `use_api_mode` | bool | `False` | When `True`, transcription requests are sent to the API server. When `False`, the local Whisper model is used. |
-| `api_url` | string | `http://localhost:9000` | URL of the Whisper API webservice. |
-| `api_engine` | string | `faster_whisper` | Not sent to the server. Controls which query parameters the client includes in API requests. Set this to match the engine your server was started with. `faster_whisper` enables `vad_filter` and `word_timestamps` params. `whisperx` enables `diarize`, `min_speakers`, and `max_speakers` params. |
+| `use_wlk_mode` | bool | `False` | When `True`, audio is streamed to the WLK server via WebSocket. |
+| `wlk_url` | string | `ws://localhost:8765` | WebSocket URL of the WLK server. Use `ws://` for plain or `wss://` for TLS. |
+| `wlk_verify_ssl` | bool | `True` | SSL certificate verification for `wss://` connections. Set to `False` for self-signed certificates. |
+| `wlk_timeout` | int | `300` | Maximum seconds to wait for transcription to complete. |
+| `wlk_chunk_size` | int | `4096` | Audio chunk size in bytes per WebSocket message. |
+| `fallback_to_local` | bool | `False` | When `True`, falls back to local Whisper model if the WLK server is unreachable. |
+
+## Whisper ASR Mode
+
+The bot can offload transcription to a remote Whisper-compatible ASR webservice instead of running a local model. This requires a running instance of a [Whisper ASR webservice](https://github.com/ahmetoner/whisper-asr-webservice) (e.g. `faster-whisper-server`, `whisperX`).
+
+### Configuration
+
+Add or edit the `[WhisperASRSettings]` section in `config/config.ini`:
+
+```ini
+[WhisperASRSettings]
+use_asr_mode = False
+asr_url = http://localhost:9000
+asr_engine = faster_whisper
+verify_ssl = True
+enable_diarization = False
+min_speakers =
+max_speakers =
+enable_vad_filter = True
+enable_word_timestamps = False
+asr_timeout = 300
+asr_retry_attempts = 3
+fallback_to_local = False
+```
+
+### Config Reference
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `use_asr_mode` | bool | `False` | When `True`, transcription requests are sent to the ASR webservice. When `False`, the local Whisper model is used. |
+| `asr_url` | string | `http://localhost:9000` | URL of the Whisper ASR webservice. |
+| `asr_engine` | string | `faster_whisper` | Not sent to the server. Controls which query parameters the client includes in requests. Set this to match the engine your server was started with. `faster_whisper` enables `vad_filter` and `word_timestamps` params. `whisperx` enables `diarize`, `min_speakers`, and `max_speakers` params. |
 | `verify_ssl` | bool | `True` | SSL certificate verification. Set to `False` for self-signed certificates. |
-| `enable_diarization` | bool | `False` | Request speaker diarization from the API. |
+| `enable_diarization` | bool | `False` | Request speaker diarization from the ASR webservice. |
 | `min_speakers` | int or empty | _(empty)_ | Minimum number of speakers for diarization. Leave empty for auto. |
 | `max_speakers` | int or empty | _(empty)_ | Maximum number of speakers for diarization. Leave empty for auto. |
 | `enable_vad_filter` | bool | `True` | Voice activity detection filter. |
 | `enable_word_timestamps` | bool | `False` | Request word-level timestamps. |
-| `api_timeout` | int | `300` | Request timeout in seconds. |
-| `api_retry_attempts` | int | `3` | Number of retries on failure. |
-| `fallback_to_local` | bool | `False` | When `True`, falls back to local Whisper model if the API is unreachable. When `False`, the request fails with an error message to the user. |
+| `asr_timeout` | int | `300` | Request timeout in seconds. |
+| `asr_retry_attempts` | int | `3` | Number of retries on failure. |
+| `fallback_to_local` | bool | `False` | When `True`, falls back to local Whisper model if the ASR webservice is unreachable. When `False`, the request fails with an error message to the user. |
 
 ## Changes
-- v0.1718 - **Transcribing audio with remote Whisper ASR service**
-  - Added a mode to not run local model, but to use remote API instead (see `config.ini` for options)
+- v0.1719 - **WhisperLiveKit WebSocket integration**
+  - Added support for streaming audio to a [WhisperLiveKit](https://github.com/QuentinFuxa/WhisperLiveKit) server via WebSocket
+  - Handles both legacy (snapshot `lines`) and new incremental (`segments` by ID) WLK API formats
+  - Produces `.txt`, `.srt`, `.vtt`, and optional `_timestamped.txt` output, identical to other transcription modes
+  - Configurable via `[WhisperLiveKitSettings]` in `config.ini` (see docs above)
+  - WLK mode takes priority over Whisper API mode when both are enabled
+- v0.1718 - **Transcribing audio with remote Whisper ASR webservice**
+  - Added a mode to not run local model, but to use a [remote ASR webservice](https://github.com/ahmetoner/whisper-asr-webservice) instead (see `config.ini` for options)
 - v0.1717.2 - **Safer yt-dlp auto-update execution (no shell)**
   - The startup update command is now executed without `shell=True` (uses argument splitting instead).
     - This avoids shell injection footguns and makes quoted args like `"yt-dlp[default]"` behave reliably. See more info on yt-dlp's EJS dilemma [here](https://github.com/yt-dlp/yt-dlp/wiki/EJS).
