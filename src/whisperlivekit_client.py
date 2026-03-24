@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 import os
-from typing import Optional
+from typing import Optional, Union
 
 import aiohttp
 
@@ -13,7 +13,34 @@ class WLKError(Exception):
     pass
 
 
-def _seconds_to_srt_time(t: float) -> str:
+def _to_float(t: Union[float, str, None]) -> float:
+    """Helper to ensure we have a float duration, supporting WLK string format H:MM:SS.cc"""
+    if t is None:
+        return 0.0
+    if isinstance(t, (int, float)):
+        return float(t)
+    if isinstance(t, str):
+        try:
+            # Format could be H:MM:SS.cc or H:MM:SS
+            parts = t.split(':')
+            if len(parts) == 3:
+                h = int(parts[0])
+                m = int(parts[1])
+                s_str = parts[2]
+                if '.' in s_str:
+                    s_parts = s_str.split('.')
+                    s = int(s_parts[0])
+                    cs = int(s_parts[1])
+                    return h * 3600 + m * 60 + s + cs / 100.0
+                else:
+                    return h * 3600 + m * 60 + int(s_str)
+        except (ValueError, IndexError):
+            pass
+    return 0.0
+
+
+def _seconds_to_srt_time(t: Union[float, str, None]) -> str:
+    t = _to_float(t)
     h = int(t // 3600)
     m = int((t % 3600) // 60)
     s = int(t % 60)
@@ -21,7 +48,7 @@ def _seconds_to_srt_time(t: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
-def _seconds_to_vtt_time(t: float) -> str:
+def _seconds_to_vtt_time(t: Union[float, str, None]) -> str:
     return _seconds_to_srt_time(t).replace(',', '.')
 
 
@@ -45,8 +72,8 @@ def _build_srt(segments: list) -> str:
         text = seg.get('text', '').strip()
         if not text:
             continue
-        start = _seconds_to_srt_time(seg.get('start', 0.0))
-        end = _seconds_to_srt_time(seg.get('end', 0.0))
+        start = _seconds_to_srt_time(seg.get('start'))
+        end = _seconds_to_srt_time(seg.get('end'))
         entries.append(f"{idx}\n{start} --> {end}\n{text}")
         idx += 1
     return '\n\n'.join(entries)
@@ -60,8 +87,8 @@ def _build_vtt(segments: list) -> str:
         text = seg.get('text', '').strip()
         if not text:
             continue
-        start = _seconds_to_vtt_time(seg.get('start', 0.0))
-        end = _seconds_to_vtt_time(seg.get('end', 0.0))
+        start = _seconds_to_vtt_time(seg.get('start'))
+        end = _seconds_to_vtt_time(seg.get('end'))
         lines.append(f"{start} --> {end}")
         lines.append(text)
         lines.append('')
@@ -82,23 +109,24 @@ async def transcribe_via_wlk(
     if not os.path.exists(audio_path):
         raise WLKError(f"Audio file not found: {audio_path}")
 
-    endpoint = wlk_url.rstrip('/') + '/asr'
+    # Ensure endpoint is correctly formatted
+    endpoint = wlk_url.rstrip('/')
+    if not endpoint.endswith('/asr'):
+        endpoint += '/asr'
+        
     ssl_param = None if verify_ssl else False
-
-    # For legacy API: track the latest complete lines snapshot.
-    # For new incremental API: accumulate segments by ID.
-    final_lines: list = []
-    segments_by_id: dict = {}
-    use_legacy: Optional[bool] = None
+    responses = []
 
     async def _send_audio(ws):
         with open(audio_path, 'rb') as f:
             while chunk := f.read(chunk_size):
                 await ws.send_bytes(chunk)
-        logger.info("Audio transmission to WLK complete")
+        
+        # Signal end of audio - CRITICAL for WLK to finish processing
+        await ws.send_bytes(b"")
+        logger.info("Audio transmission to WLK complete, sent EOF signal")
 
     async def _recv_messages(ws):
-        nonlocal use_legacy, final_lines
         async for msg in ws:
             if msg.type == aiohttp.WSMsgType.TEXT:
                 data = json.loads(msg.data)
@@ -109,32 +137,11 @@ async def transcribe_via_wlk(
                     return
 
                 if msg_type == 'config':
-                    logger.info(f"WLK config received: {data}")
                     continue
-
-                # Legacy API sends full state snapshots in 'lines'.
-                if 'lines' in data and use_legacy is not False:
-                    use_legacy = True
-                    final_lines = data['lines']
-                elif 'segments' in data:
-                    # New incremental API: merge by segment ID.
-                    use_legacy = False
-                    for seg in data['segments']:
-                        seg_id = seg['id']
-                        if seg_id not in segments_by_id:
-                            segments_by_id[seg_id] = dict(seg)
-                        else:
-                            existing = segments_by_id[seg_id]
-                            existing['text'] = existing.get('text', '') + seg.get('text', '')
-                            if seg.get('translation'):
-                                existing['translation'] = existing.get('translation', '') + seg['translation']
-                            if seg.get('end') is not None:
-                                existing['end'] = seg['end']
-                            if seg.get('language'):
-                                existing['language'] = seg['language']
+                
+                responses.append(data)
 
             elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR):
-                logger.info(f"WLK WebSocket {msg.type.name.lower()}")
                 return
 
     try:
@@ -142,25 +149,36 @@ async def transcribe_via_wlk(
         async with aiohttp.ClientSession(connector=connector) as session:
             async with session.ws_connect(endpoint, ssl=ssl_param) as ws:
                 logger.info(f"Connected to WLK WebSocket at {endpoint}")
+                
+                send_task = asyncio.create_task(_send_audio(ws))
+                recv_task = asyncio.create_task(_recv_messages(ws))
+                
                 await asyncio.wait_for(
-                    asyncio.gather(_send_audio(ws), _recv_messages(ws)),
+                    asyncio.gather(send_task, recv_task),
                     timeout=float(timeout),
                 )
     except asyncio.TimeoutError:
         raise WLKError(f"WLK transcription timed out after {timeout}s")
-    except aiohttp.ClientError as e:
-        raise WLKError(f"WLK WebSocket connection failed: {e}")
-    except WLKError:
-        raise
     except Exception as e:
-        raise WLKError(f"Unexpected error during WLK transcription: {e}")
+        raise WLKError(f"WLK transcription error: {e}")
 
-    if use_legacy:
-        segments = final_lines
-    elif segments_by_id:
-        segments = sorted(segments_by_id.values(), key=lambda s: s.get('start', 0.0))
-    else:
-        logger.warning("WLK returned no transcription segments")
+    # Process responses to get final segments
+    segments = []
+    if responses:
+        # Get the latest response with 'lines'
+        for resp in reversed(responses):
+            if 'lines' in resp and resp['lines']:
+                segments = resp['lines']
+                break
+        
+        if not segments:
+            # Fallback to last buffer if no lines were committed
+            buffer = responses[-1].get('buffer_transcription', '')
+            if buffer:
+                segments = [{'text': buffer, 'start': 0.0, 'end': 0.0, 'speaker': 1}]
+
+    if not segments:
+        logger.warning("WLK returned no transcription results")
         return '', '', ''
 
     return _build_txt(segments), _build_srt(segments), _build_vtt(segments)
